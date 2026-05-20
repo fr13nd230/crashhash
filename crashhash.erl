@@ -1,7 +1,7 @@
 -module(crashhash).
--export([command/2, server/1, kickstart/0]).
+-export([session/2, server/1, start/0]).
 
-kickstart() ->
+start() ->
     ListenAddr = "127.0.0.1",
     ListenPort = 6767,
     {ok, IP} = inet:parse_address(ListenAddr),
@@ -18,66 +18,57 @@ kickstart() ->
     end.
 
 server(LSock) ->
-    {ok, Sock} = gen_tcp:accept(LSock),
-    spawn(fun() -> handle_client(Sock) end),
+    case gen_tcp:accept(LSock) of
+        {ok, Sock} -> 
+            spawn(?MODULE, session, [{command, <<>>}, Sock]),
+            server(LSock);
+        {error, closed} ->
+            io:format("[SERVER] Connection has been closed from client.", []),
+            gen_tcp:close(LSock);
+        {error, Reason} ->
+            io:format("[ERROR] Unable to accept listening socket ~p~n", [Reason]),
+            gen_tcp:close(LSock)
+    end,
     server(LSock).
 
-handle_client(Sock) ->
-    {{UTC_Year, UTC_Month, UTC_Day}, {UTC_Hour, UTC_Minute, _}} = calendar:universal_time(),
-    gen_tcp:send(Sock, io_lib:format(
-        "[SERVER] Welcome to crashhash, current time: ~w-~w-~w at ~w:~w~n",
-        [UTC_Year, UTC_Month, UTC_Day, UTC_Hour, UTC_Minute]
-    )),
-    loop(Sock).
-
-loop(Sock) ->
+session({command, _}, Sock) ->
     case gen_tcp:recv(Sock, 0) of
-        {ok, <<"CLOSE\r\n">>} ->
-            gen_tcp:send(Sock, "[SERVER] Sorry to see you leave so soon! Adios.\n"),
-            gen_tcp:close(Sock);
-
-        {ok, <<"READ ", Id/binary>>} ->
-            command(Sock, {see, Id}),
-            loop(Sock);                          
-
-        {ok, <<"PUB\r\n", Buffs/binary>>} ->
-            command(Sock, {pub, Buffs});
-
-        {ok, _} ->
-            gen_tcp:send(Sock, "[ERROR] Invalid command.\n"),
-            loop(Sock);                         
-
-        {error, closed} ->
-            io:format("[SERVER] Client disconnected.~n"),
-            gen_tcp:close(Sock);
-
-        {error, Reason} ->
-            io:format("[ERROR] Receive failed: ~p~n", [Reason]),
-            gen_tcp:close(Sock)
+            {ok, <<"CLOSE\r\n>>"} -> 
+                gen_tcp:send("[SERVER] Sorry to see you leave, see ya!"),
+                gen_tcp:close();
+            {ok, <<"PUB\r\n", Buffs/binary>>} -> 
+                session({pub, Buffs}, Sock);
+            {ok, _} ->
+                gen_tcp:send("[ERROR] Invalid command you have provided."),
+                session({command, <<>>}, Sock);
+            {error, Reason} -> 
+                io:format("[ERROR] Unable to receive data from remote ~p~n", [Reason]),
+                gen_tcp:close()
+    end;
+session({pub, Buffs}, Sock) ->
+    case gen_tcp:recv(Sock, 0) of
+            {ok, <<"DONE\r\n">>} -> 
+                session({command, <<>>}, Sock);
+            {ok, Line} -> 
+                session({pub, <<Buffs/binary, Line/binary>>}, Sock);
+            {error, Reason} -> 
+                io:format("[ERROR] Unable to receive data from remote ~p~n", [Reason]),
+                gen_tcp:close()
     end.
 
-command(Sock, {read, Id}) ->
-    io:format("[SERVER] Received ID: ~p~n", [Id]),
-    gen_tcp:send(Sock, io_lib:format("[SERVER] COMMAND ACCEPTED (READ) -> TODO [~w]~n", [Id]));
 
-command(Sock, {pub, Buffs}) ->
-    receive 
-        {data, Data} ->
-            io:format("[SERVER] Received ID: ~p~n", [Buffs]);
-        stop ->
-            ok,
-    end.
 % How will carshhash works as low level PoW concept?
 % PUB\r\n
 % text
 % in
 % here
 % ...
-%
+% DONE <<< we are here now
 % CHALLENGE <hash>
-%
-% SUB <preffix + hash>
 
 % READ <id>
-
-% CLOSE -> Send a close to server and kills connection immediately
+% CLOSE <<< done
+%
+% Only Commands Are [PUB, READ, CLOSE]
+%                     ^             ^
+%                     done          done
